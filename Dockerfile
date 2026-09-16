@@ -11,4 +11,5 @@ COPY app.py dexdump_core.py ./
 
 ENV PORT=10000
 EXPOSE 10000
-CMD ["gunicorn","app:app","--bind","0.0.0.0:10000","--timeout","300","--workers","2"]
+
+CMD ["gunicorn","app:app","--bind","0.0.0.0:10000","--timeout","600","--workers","1","--threads","4"]

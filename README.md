@@ -1,25 +1,19 @@
-# SikeMod DEX Dumper
+# SikeMod DEX Dumper PRO
 
-Web tool bóc DEX từ APK + memory dump, deploy Render.
-
-## Deploy Render
-
-1. Push 6 file lên GitHub repo
-2. dashboard.render.com → New → Web Service → Connect repo
-3. Render tự build từ render.yaml
-4. Mở URL → dùng
+Web tool dump DEX từ APK + memory dump.
 
 ## Tính năng
-
 - Bóc classes*.dex từ APK
-- Quét DEX ẩn trong assets/ (magic dex\n)
-- Nhận diện 9 loại shell: 360, Tencent, Bangcle, IJiami, Alibaba, Naga, Baidu, Virbox, DexProtector
-- Thử XOR single-byte + AES-ECB với key trích từ APK
-- Quét DEX trong memory dump (từ frida, /proc/pid/mem, GameGuardian)
-- Tải từng file .dex về
+- Quét DEX ẩn trong assets/res/raw/lib
+- Nhận diện 10 shell pack (360, Tencent, Bangcle, IJiami, Alibaba, Naga, Baidu, Virbox, DexProtector, Tencent Game)
+- Giải mã XOR single-byte + AES-ECB với key trích từ APK
+- Dump DEX từ memory dump (frida, /proc/pid/mem, GameGuardian)
+- Unpack full APK thành ZIP
+- Phân tích DEX header + strings
+- Tải tất cả DEX 1 click
+- Hỗ trợ upload XAPK/APKS
 
-## Giới hạn
-
-- DEX bị shell pack mạnh (360/Tencent/Bangcle) → chỉ giải mã runtime
-  → phải dump động bằng frida-dexdump rồi upload memory dump
-- Render free: 512MB RAM, timeout 100s → APK >200MB có thể fail
+## Deploy Render
+1. Push code lên GitHub
+2. Render → New Web Service → Docker → main → Free
+3. Deploy → mở URL
