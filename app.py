@@ -1,356 +1,198 @@
-import os, re, struct, zipfile, hashlib, json
-from io import BytesIO
+import os, io, zipfile, time, hashlib, json, re
+from flask import Flask, request, jsonify, send_file, render_template_string
+from dexdump_core import process_apk, process_memory_dump, SHELL_SIGNATURES
 
-# ============ SHELL SIGNATURES ============
-SHELL_SIGNATURES = {
-    "360 (Qihoo)": {
-        "files": ["libjiagu.so", "libjiagu_art.so", "libjiagu_x86.so",
-                  "libjiagu_x86_64.so", "libjiagu_a64.so"],
-        "assets": ["libjiagu.so", "libjiagu_art.so"],
-        "strings": [b"libjiagu", b"qihoo", b"360.CrashHandler", b"com.qihoo.util"],
-        "type": "dynamic",
-        "note": "360 Jiagu — DEX mã hóa trong libjiagu.so, giải mã runtime qua JNI_OnLoad"
-    },
-    "Tencent Legu": {
-        "files": ["libshella.so", "libshellx.so", "libtosprotection.so",
-                  "libtosprotection.armeabi.so"],
-        "assets": ["0OO00l111l1l", "o0oooOO0ooOo.dat", "tosversion"],
-        "strings": [b"legu", b"tencent", b"shellApplication", b"com.tencent.StubShell"],
-        "type": "dynamic",
-        "note": "Tencent Legu — DEX trong assets mã hóa, stub shell load runtime"
-    },
-    "Bangcle (SecNeo)": {
-        "files": ["libsecexe.so", "libsecmain.so", "libDexHelper.so", "libSecShell.so"],
-        "assets": ["classes.dex.dat", "mfc.dat", "bangcle"],
-        "strings": [b"bangcle", b"secneo", b"SecShell", b"com.secneo"],
-        "type": "dynamic",
-        "note": "Bangcle — DEX mã hóa trong assets/classes.dex.dat"
-    },
-    "IJiami (Jiami)": {
-        "files": ["libexec.so", "libexecmain.so", "libjiagu.so", "libijiami.so"],
-        "assets": ["ijiami.ajm", "ijiami.dat"],
-        "strings": [b"ijiami", b"jiami", b"com.ijiami"],
-        "type": "dynamic",
-        "note": "IJiami — DEX trong assets/ijiami.ajm"
-    },
-    "Alibaba (Ali)": {
-        "files": ["libmobisec.so", "libsgmain.so", "libsgsecuritybody.so"],
-        "assets": ["ali.dat", "mobisec"],
-        "strings": [b"mobisec", b"alibaba", b"com.ali.mobisecenhance"],
-        "type": "dynamic",
-        "note": "Alibaba — DEX mã hóa, giải mã runtime"
-    },
-    "Naga (Yidun)": {
-        "files": ["libchaosvmp.so", "libddog.so", "libfdog.so", "libnsecure.so"],
-        "assets": ["naga.dat"],
-        "strings": [b"naga", b"yidun", b"libchaosvmp"],
-        "type": "dynamic",
-        "note": "Naga — VM-based protection"
-    },
-    "Baidu": {
-        "files": ["libbaiduprotect.so"],
-        "assets": ["baiduprotect"],
-        "strings": [b"baiduprotect", b"com.baidu.protect"],
-        "type": "dynamic",
-        "note": "Baidu Protect"
-    },
-    "KiwiVM / Virbox": {
-        "files": ["libvirbox.so", "libvbox.so"],
-        "assets": ["virbox"],
-        "strings": [b"virbox", b"kiwivm"],
-        "type": "dynamic",
-        "note": "Virbox VM"
-    },
-    "DexProtector": {
-        "files": ["libdexprotector.so", "libdp.so"],
-        "assets": ["dexprotector"],
-        "strings": [b"dexprotector", b"licensing"],
-        "type": "dynamic",
-        "note": "DexProtector"
-    },
+# ============ BẮT BUỘC PHẢI CÓ DÒNG NÀY ============
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 800 * 1024 * 1024
+
+OUT = os.path.abspath("./jobs")
+os.makedirs(OUT, exist_ok=True)
+
+PAGE = r"""
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>SikeMod DEX Dumper</title>
+<style>
+*{box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono',monospace;padding:24px;max-width:1000px;margin:auto}
+h1{color:#58a6ff;margin-bottom:2px}
+.sub{color:#8b949e;margin-bottom:20px;font-size:13px}
+.tabs{display:flex;gap:8px;margin-bottom:16px;border-bottom:1px solid #30363d}
+.tab{padding:10px 16px;cursor:pointer;color:#8b949e;border-bottom:2px solid transparent}
+.tab.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.panel{display:none}.panel.active{display:block}
+.drop{border:2px dashed #30363d;border-radius:12px;padding:36px;text-align:center;
+      background:#161b22;transition:.2s;cursor:pointer}
+.drop:hover,.drop.hover{border-color:#58a6ff;background:#1c2128}
+.drop input{display:none}
+.btn{background:#238636;color:#fff;border:0;padding:11px 22px;border-radius:6px;
+     cursor:pointer;font-family:inherit;font-size:14px;margin-top:12px}
+.btn:hover{background:#2ea043}
+.btn:disabled{background:#30363d;cursor:not-allowed}
+.btn.alt{background:#1f6feb}.btn.alt:hover{background:#388bfd}
+pre{background:#161b22;padding:14px;border:1px solid #30363d;border-radius:8px;
+    max-height:420px;overflow:auto;font-size:12.5px;line-height:1.5}
+.file{display:flex;justify-content:space-between;align-items:center;
+      background:#161b22;padding:10px 14px;border:1px solid #30363d;
+      border-radius:6px;margin:6px 0}
+.file a{color:#58a6ff;text-decoration:none}
+.file a:hover{text-decoration:underline}
+.size{color:#8b949e;font-size:12px}
+.bar{height:6px;background:#30363d;border-radius:3px;overflow:hidden;margin-top:10px}
+.bar > div{height:100%;background:#58a6ff;width:0;transition:.2s}
+.shell{background:#3d1f1f;border:1px solid #f85149;padding:10px;border-radius:6px;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;background:#30363d;margin-right:4px}
+.tag.red{background:#f85149}.tag.green{background:#2ea043}
+</style></head><body>
+<h1>👑 SikeMod DEX Dumper</h1>
+<div class="sub">Bóc DEX gốc từ APK · nhận diện shell pack · dump memory</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="tab(0)">📦 APK</div>
+  <div class="tab" onclick="tab(1)">🧠 Memory Dump</div>
+  <div class="tab" onclick="tab(2)">ℹ️ Shell Info</div>
+</div>
+
+<div class="panel active">
+  <div class="drop" id="drop0">
+    <input type="file" id="file0" accept=".apk,.zip,.xapk,.apks">
+    <div id="label0">📦 Kéo thả APK vào đây hoặc click chọn</div>
+    <div class="bar"><div id="bar0"></div></div>
+  </div>
+  <button class="btn" id="btn0" disabled onclick="uploadApk()">BÓC DEX</button>
+  <pre id="log0">[idle] chờ file...</pre>
+  <div id="results0"></div>
+</div>
+
+<div class="panel">
+  <div class="sub">Upload file memory dump để bóc DEX ra</div>
+  <div class="drop" id="drop1">
+    <input type="file" id="file1">
+    <div id="label1">🧠 Kéo thả memory dump vào đây</div>
+    <div class="bar"><div id="bar1"></div></div>
+  </div>
+  <button class="btn alt" id="btn1" disabled onclick="uploadMem()">SCAN DEX</button>
+  <pre id="log1">[idle] chờ file...</pre>
+  <div id="results1"></div>
+</div>
+
+<div class="panel">
+  <pre id="shellinfo">Loading...</pre>
+</div>
+
+<script>
+const state={};
+function tab(i){
+  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('active',i===j));
+  document.querySelectorAll('.panel').forEach((p,j)=>p.classList.toggle('active',i===j));
 }
+['0','1'].forEach(n=>{
+  const drop=document.getElementById('drop'+n), file=document.getElementById('file'+n),
+        label=document.getElementById('label'+n), btn=document.getElementById('btn'+n);
+  drop.onclick=()=>file.click();
+  drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};
+  drop.ondragleave=()=>drop.classList.remove('hover');
+  drop.ondrop=e=>{e.preventDefault();drop.classList.remove('hover');
+    if(e.dataTransfer.files.length){file.files=e.dataTransfer.files;upd(n)}};
+  file.onchange=()=>upd(n);
+  function upd(n){
+    const f=file.files[0]; if(!f){btn.disabled=true;return;}
+    label.textContent='📦 '+f.name+' ('+(f.size/1024/1024).toFixed(2)+' MB)';
+    btn.disabled=false;
+  }
+  state[n]={drop,file,label,btn};
+});
+function renderFiles(container, job, files){
+  if(!files || !files.length){ container.innerHTML='<div class="shell">⚠️ Không có file DEX nào</div>'; return; }
+  let h='<h3>📥 File tải về:</h3>';
+  files.forEach(f=>{
+    h+=`<div class="file">
+      <a href="/download/${job}/${encodeURIComponent(f.name)}" download>⬇ ${f.name}</a>
+      <span class="size">${(f.size/1024).toFixed(1)} KB</span>
+    </div>`;
+  });
+  container.innerHTML=h;
+}
+function uploadApk(){
+  const f=state['0'].file.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('apk',f);
+  const xhr=new XMLHttpRequest(); xhr.open('POST','/dump/apk');
+  const log=document.getElementById('log0'); log.textContent='[*] Upload...\n';
+  document.getElementById('results0').innerHTML='';
+  state['0'].btn.disabled=true;
+  xhr.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('bar0').style.width=(e.loaded/e.total*100)+'%'};
+  xhr.onload=()=>{state['0'].btn.disabled=false;
+    try{const j=JSON.parse(xhr.responseText);log.textContent=JSON.stringify(j,null,2);
+    renderFiles(document.getElementById('results0'),j.job,j.files);}catch(e){log.textContent+='[!] '+e.message;}};
+  xhr.onerror=()=>{state['0'].btn.disabled=false;log.textContent+='[!] Network error';};
+  xhr.send(fd);
+}
+function uploadMem(){
+  const f=state['1'].file.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('mem',f);
+  const xhr=new XMLHttpRequest(); xhr.open('POST','/dump/memory');
+  const log=document.getElementById('log1'); log.textContent='[*] Upload...\n';
+  document.getElementById('results1').innerHTML='';
+  state['1'].btn.disabled=true;
+  xhr.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('bar1').style.width=(e.loaded/e.total*100)+'%'};
+  xhr.onload=()=>{state['1'].btn.disabled=false;
+    try{const j=JSON.parse(xhr.responseText);log.textContent=JSON.stringify(j,null,2);
+    renderFiles(document.getElementById('results1'),j.job,j.files);}catch(e){log.textContent+='[!] '+e.message;}};
+  xhr.onerror=()=>{state['1'].btn.disabled=false;log.textContent+='[!] Network error';};
+  xhr.send(fd);
+}
+fetch('/shells').then(r=>r.json()).then(j=>{
+  document.getElementById('shellinfo').textContent=JSON.stringify(j,null,2);
+});
+</script></body></html>
+"""
 
-DEX_MAGIC = b"dex\n"
+@app.route("/")
+def home():
+    return render_template_string(PAGE)
 
-# ============ UTILS ============
+@app.route("/shells")
+def shells():
+    return jsonify(SHELL_SIGNATURES)
 
-def is_valid_dex(data: bytes) -> bool:
-    if len(data) < 112: return False
-    if data[:4] != DEX_MAGIC: return False
-    # version: 035, 037, 038, 039
-    if data[4:7] not in (b"035", b"037", b"038", b"039"):
-        return False
+@app.route("/dump/apk", methods=["POST"])
+def dump_apk():
+    if 'apk' not in request.files:
+        return jsonify(status='error', output='no file'), 400
+    f = request.files['apk']
+    job = hashlib.md5(f"{f.filename}{time.time()}".encode()).hexdigest()[:12]
+    jobdir = os.path.join(OUT, job); os.makedirs(jobdir, exist_ok=True)
+    apk_path = os.path.join(jobdir, "input.apk")
+    f.save(apk_path)
     try:
-        file_size = struct.unpack("<I", data[32:36])[0]
-        header_size = struct.unpack("<I", data[36:40])[0]
-        if file_size < 112 or file_size > len(data) + 16: return False
-        if header_size != 0x70: return False
-        endian = struct.unpack("<I", data[40:44])[0]
-        if endian != 0x12345678: return False
-        return True
-    except Exception:
-        return False
+        result = process_apk(apk_path, jobdir)
+    except Exception as e:
+        return jsonify(status='error', output=str(e), job=job, files=[]), 500
+    return jsonify(job=job, **result)
 
-def dex_sha1(data: bytes) -> str:
-    return hashlib.sha1(data).hexdigest()
-
-def detect_shell(zip_names, apk_bytes) -> dict:
-    """Phát hiện shell pack dựa trên file names + strings trong APK"""
-    detected = []
-    names_lower = [n.lower() for n in zip_names]
-
-    for shell_name, sig in SHELL_SIGNATURES.items():
-        score = 0
-        hits = []
-        for f in sig.get("files", []):
-            if any(f.lower() in n for n in names_lower):
-                score += 3; hits.append(f)
-        for a in sig.get("assets", []):
-            if any(a.lower() in n for n in names_lower):
-                score += 2; hits.append(a)
-        for s in sig.get("strings", []):
-            if s.lower() in apk_bytes.lower():
-                score += 1; hits.append(s.decode('utf-8', 'ignore'))
-        if score >= 2:
-            detected.append({
-                "name": shell_name,
-                "score": score,
-                "hits": list(set(hits))[:8],
-                "type": sig["type"],
-                "note": sig["note"],
-            })
-
-    detected.sort(key=lambda x: -x["score"])
-    return detected
-
-def scan_dex_in_buffer(data: bytes, min_size: int = 112):
-    """Quét tìm tất cả DEX trong buffer (magic dex\n)"""
-    results = []
-    pos = 0
-    while True:
-        idx = data.find(DEX_MAGIC, pos)
-        if idx == -1: break
-        # đọc file_size từ header
-        if idx + 36 <= len(data):
-            file_size = struct.unpack("<I", data[idx+32:idx+36])[0]
-            if 112 <= file_size <= len(data) - idx:
-                chunk = data[idx:idx+file_size]
-                if is_valid_dex(chunk):
-                    results.append((idx, chunk))
-                    pos = idx + file_size
-                    continue
-        pos = idx + 4
-    return results
-
-# ============ GIẢI MÃ CƠ BẢN ============
-
-def try_xor_decrypt(data: bytes, max_key_len: int = 8):
-    """Thử XOR với key 1 byte phổ biến (0x00-0xFF)"""
-    candidates = []
-    for k in range(1, 256):
-        # chỉ test byte đầu để tìm magic dex
-        if data[0] ^ k == ord('d') and len(data) > 4:
-            if data[1] ^ k == ord('e') and data[2] ^ k == ord('x'):
-                dec = bytes(b ^ k for b in data)
-                if is_valid_dex(dec):
-                    candidates.append(("xor_single_%02x" % k, dec))
-    return candidates
-
-def try_aes_ecb_decrypt(data: bytes, keys: list):
-    """Thử AES-ECB với danh sách key (bytes)"""
+@app.route("/dump/memory", methods=["POST"])
+def dump_memory():
+    if 'mem' not in request.files:
+        return jsonify(status='error', output='no file'), 400
+    f = request.files['mem']
+    job = hashlib.md5(f"{f.filename}{time.time()}".encode()).hexdigest()[:12]
+    jobdir = os.path.join(OUT, job); os.makedirs(jobdir, exist_ok=True)
+    mem_path = os.path.join(jobdir, "input.bin")
+    f.save(mem_path)
     try:
-        from Crypto.Cipher import AES
-    except ImportError:
-        return []
-    candidates = []
-    for key in keys:
-        if len(key) not in (16, 24, 32): continue
-        try:
-            cipher = AES.new(key, AES.MODE_ECB)
-            dec = cipher.decrypt(data[:len(data)//16*16])
-            # tìm magic dex
-            if DEX_MAGIC in dec[:4096]:
-                idx = dec.find(DEX_MAGIC)
-                chunk = dec[idx:]
-                if is_valid_dex(chunk):
-                    candidates.append((f"aes_ecb_{key.hex()[:8]}", chunk))
-        except Exception:
-            continue
-    return candidates
+        result = process_memory_dump(mem_path, jobdir)
+    except Exception as e:
+        return jsonify(status='error', output=str(e), job=job, files=[]), 500
+    return jsonify(job=job, **result)
 
-def extract_keys_from_apk(z: zipfile.ZipFile):
-    """Cố gắng trích key hardcoded từ assets/ và lib/"""
-    keys = []
-    patterns = [
-        rb'[A-Za-z0-9+/]{16,32}={0,2}',  # base64-like
-        rb'[\x20-\x7e]{16}',              # 16 ascii chars
-        rb'[\x20-\x7e]{24}',
-        rb'[\x20-\x7e]{32}',
-    ]
-    for name in z.namelist():
-        if name.endswith("/"): continue
-        if not (name.startswith("assets/") or name.startswith("lib/") or name.endswith(".dex")):
-            continue
-        try:
-            data = z.read(name)
-        except Exception:
-            continue
-        for pat in patterns:
-            for m in re.finditer(pat, data):
-                keys.append(m.group())
-        if len(keys) > 500: break  # giới hạn
-    # dedup
-    seen = set(); uniq = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k); uniq.append(k)
-    return uniq[:200]
+@app.route("/download/<job>/<name>")
+def download(job, name):
+    if any(c in job for c in '/\\..') or any(c in name for c in '/\\..'):
+        return "bad", 400
+    path = os.path.join(OUT, job, name)
+    if not os.path.isfile(path):
+        return "not found", 404
+    return send_file(path, as_attachment=True, download_name=name)
 
-# ============ PROCESS APK ============
-
-def process_apk(apk_path: str, jobdir: str) -> dict:
-    found = []
-    fallback = ""
-    logs = []
-
-    if not zipfile.is_zipfile(apk_path):
-        return {"status": "error", "output": "Không phải ZIP/APK hợp lệ",
-                "files": [], "fallback": ""}
-
-    with open(apk_path, "rb") as fp:
-        apk_bytes = fp.read()
-
-    with zipfile.ZipFile(apk_path, "r") as z:
-        names = z.namelist()
-
-        # 1. Phát hiện shell
-        shells = detect_shell(names, apk_bytes)
-        if shells:
-            logs.append(f"[!] Phát hiện shell: {', '.join(s['name'] for s in shells)}")
-
-        # 2. Bóc classes*.dex chuẩn
-        for name in names:
-            base = os.path.basename(name)
-            if base.startswith("classes") and base.endswith(".dex"):
-                data = z.read(name)
-                if is_valid_dex(data):
-                    out = base
-                    with open(os.path.join(jobdir, out), "wb") as o:
-                        o.write(data)
-                    found.append({"name": out, "size": len(data), "shell": None})
-                else:
-                    # DEX bị hỏng/mã hóa
-                    logs.append(f"[!] {name} không phải DEX hợp lệ (có thể bị mã hóa)")
-
-        # 3. Quét DEX ẩn trong assets/ và toàn bộ APK
-        for name in names:
-            if name.endswith("/"): continue
-            if name.startswith("classes") and name.endswith(".dex"): continue
-            if not (name.startswith("assets/") or name.startswith("res/raw/")):
-                continue
-            try:
-                data = z.read(name)
-            except Exception:
-                continue
-            hits = scan_dex_in_buffer(data)
-            for idx, dex_data in hits:
-                out = f"embedded_{os.path.basename(name)}_{idx:08x}.dex"
-                with open(os.path.join(jobdir, out), "wb") as o:
-                    o.write(dex_data)
-                found.append({"name": out, "size": len(dex_data), "shell": None})
-
-        # 4. Thử giải mã assets đáng ngờ (XOR / AES)
-        suspect_exts = (".dat", ".ajm", ".bin", ".so", ".dex", "")
-        suspect_assets = []
-        for name in names:
-            if name.startswith("assets/"):
-                b = os.path.basename(name).lower()
-                if any(b.endswith(e) for e in suspect_exts if e) or b in (
-                    "0oo00l111l1l", "o0oooOO0ooOo.dat", "tosversion",
-                    "ijiami.ajm", "ijiami.dat", "ali.dat", "naga.dat",
-                    "mfc.dat", "bangcle", "baiduprotect"
-                ):
-                    suspect_assets.append(name)
-
-        # Lấy key candidates
-        keys = extract_keys_from_apk(z)
-
-        for name in suspect_assets:
-            try:
-                data = z.read(name)
-            except Exception:
-                continue
-            if len(data) < 200 or len(data) > 100 * 1024 * 1024:
-                continue
-            # thử XOR
-            for tag, dec in try_xor_decrypt(data[:2000000]):
-                out = f"decrypted_{tag}_{os.path.basename(name)}.dex"
-                with open(os.path.join(jobdir, out), "wb") as o:
-                    o.write(dec)
-                found.append({"name": out, "size": len(dec), "shell": None})
-                logs.append(f"[+] XOR decrypt OK: {name} -> {out}")
-            # thử AES
-            for tag, dec in try_aes_ecb_decrypt(data[:2000000], keys):
-                out = f"decrypted_{tag}_{os.path.basename(name)}.dex"
-                with open(os.path.join(jobdir, out), "wb") as o:
-                    o.write(dec)
-                found.append({"name": out, "size": len(dec), "shell": None})
-                logs.append(f"[+] AES decrypt OK: {name} -> {out}")
-
-    # 5. Fallback nếu không có DEX hợp lệ
-    if not found and shells:
-        fallback = (
-            "APK bị shell pack. DEX gốc mã hóa trong native lib/assets, "
-            "chỉ giải mã runtime. Cần dump động: frida-dexdump / FRIDA-DEXDump / "
-            "dump /proc/pid/mem khi app chạy. Dùng tab 'Memory Dump' upload file dump."
-        )
-    elif not found:
-        fallback = "Không tìm thấy DEX nào. APK có thể rỗng hoặc định dạng lạ."
-
-    return {
-        "status": "ok",
-        "output": "\n".join(logs) if logs else "Done",
-        "files": found,
-        "shells": shells,
-        "fallback": fallback,
-    }
-
-# ============ PROCESS MEMORY DUMP ============
-
-def process_memory_dump(mem_path: str, jobdir: str) -> dict:
-    """Quét DEX trong file memory dump (từ /proc/pid/mem, frida, GG...)"""
-    found = []
-    size = os.path.getsize(mem_path)
-    CHUNK = 64 * 1024 * 1024  # 64MB/chunk
-    overlap = 1024 * 1024     # overlap 1MB để không miss DEX ở ranh giới
-
-    with open(mem_path, "rb") as f:
-        offset = 0
-        carry = b""
-        while True:
-            chunk = f.read(CHUNK)
-            if not chunk: break
-            buf = carry + chunk
-            hits = scan_dex_in_buffer(buf)
-            for idx, dex_data in hits:
-                sha = dex_sha1(dex_data)
-                out = f"mem_{offset+idx:012x}_{sha[:8]}.dex"
-                if not os.path.exists(os.path.join(jobdir, out)):
-                    with open(os.path.join(jobdir, out), "wb") as o:
-                        o.write(dex_data)
-                    found.append({"name": out, "size": len(dex_data), "shell": None})
-            carry = buf[-overlap:] if len(buf) > overlap else buf
-            offset += len(chunk)
-            if offset > 4 * 1024 * 1024 * 1024:  # giới hạn 4GB
-                break
-
-    fallback = ""
-    if not found:
-        fallback = ("Không tìm thấy DEX trong memory dump. "
-                    "Có thể dump sai vùng nhớ, hoặc DEX bị mã hóa trong RAM.")
-    return {
-        "status": "ok",
-        "output": f"Quét {offset} bytes, tìm được {len(found)} DEX",
-        "files": found,
-        "fallback": fallback,
-    }
+if __name__ == "__main__":
+    app.run("0.0.0.0", int(os.environ.get("PORT", 10000)))
