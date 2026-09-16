@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify, send_file, render_template_string, Re
 from dexdump_core import (
     process_apk, process_memory_dump, SHELL_SIGNATURES,
     is_valid_dex, scan_dex_in_buffer, unpack_apk_full,
-    extract_manifest_info, decompile_dex_basic
+    decompile_dex_basic
 )
 
 app = Flask(__name__)
