@@ -322,12 +322,18 @@ def dexinfo():
 
 @app.route("/download/<job>/<name>")
 def download(job, name):
-    if any(c in job for c in '/\\..') or any(c in name for c in '/\\..'):
+    # File names such as ``classes.dex`` and ``unpacked.zip`` are valid.
+    # The previous check rejected every dot, so all normal downloads returned
+    # HTTP 400.  Resolve the path and ensure it stays inside this job folder.
+    if not job or job in {".", ".."} or "/" in job or "\\" in job:
         return "bad", 400
-    path = os.path.join(OUT, job, name)
-    if not os.path.isfile(path):
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        return "bad", 400
+    jobdir = os.path.realpath(os.path.join(OUT, job))
+    path = os.path.realpath(os.path.join(jobdir, name))
+    if os.path.dirname(path) != jobdir or not os.path.isfile(path):
         return "not found", 404
-    return send_file(path, as_attachment=True, download_name=name)
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
 
 @app.route("/health")
 def health():
